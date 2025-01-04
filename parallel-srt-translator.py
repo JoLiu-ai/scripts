@@ -3,7 +3,6 @@ import time
 import logging
 from multiprocessing import Pool, cpu_count
 from typing import List, Tuple, Dict
-import math
 import re
 
 class SubtitleBlock:
@@ -22,7 +21,7 @@ def parse_srt(file_content: List[str]) -> List[SubtitleBlock]:
     current_content = []
     
     for line in file_content:
-        line = line.strip()
+        line = line.rstrip('\n')
         
         # 如果是序号(纯数字)
         if re.match(r'^\d+$', line):
@@ -50,23 +49,28 @@ def parse_srt(file_content: List[str]) -> List[SubtitleBlock]:
     return blocks
 
 def translate_block(args: Tuple) -> Tuple[int, SubtitleBlock]:
-    """翻译单个字幕块"""
+    """翻译单个字幕块，保持原始的换行格式"""
     block, src_lang, dest_lang, retries, delay = args
     translator = GoogleTranslator(source=src_lang, target=dest_lang)
     
-    # 合并多行内容进行翻译
-    content = ' '.join(line.strip() for line in block.content if line.strip())
+    translated_lines = []
+    for line in block.content:
+        line = line.strip()
+        if line:  # 只翻译非空行
+            for attempt in range(retries):
+                try:
+                    translated_line = translator.translate(line)
+                    translated_lines.append(translated_line + '\n')
+                    break
+                except Exception as e:
+                    if attempt < retries - 1:
+                        time.sleep(delay)
+                    else:
+                        translated_lines.append(line + '\n')
+        else:
+            translated_lines.append('\n')  # 保持空行
     
-    for attempt in range(retries):
-        try:
-            if content:  # 只翻译非空内容
-                translated_content = translator.translate(content)
-                block.content = [translated_content + '\n']
-            break
-        except Exception as e:
-            if attempt < retries - 1:
-                time.sleep(delay)
-    
+    block.content = translated_lines
     return block.index, block
 
 def parallel_translate_srt(
@@ -118,19 +122,41 @@ def parallel_translate_srt(
     with Pool(processes=num_processes) as pool:
         for i, (index, block) in enumerate(pool.imap_unordered(translate_block, translation_tasks)):
             translated_blocks[index] = block
-            if (i + 1) % 100 == 0:
+            if (i + 1) % 100 == 0 or (i + 1) == total_blocks:
                 logger.info(f"已完成 {i+1}/{total_blocks} 个字幕块")
     
     # 按原始顺序写入结果
     with open(output_path, 'w', encoding='utf-8') as outfile:
-        for i in range(1, max(translated_blocks.keys()) + 1):
+        # 从最小索引开始写入，包括0
+        min_index = min(translated_blocks.keys())
+        max_index = max(translated_blocks.keys())
+        for i in range(min_index, max_index + 1):
             if i in translated_blocks:
                 outfile.write(str(translated_blocks[i]))
     
     logger.info(f"翻译完成。共处理 {total_blocks} 个字幕块")
 
+def test_translation():
+    """测试代码，确保能正确处理从0开始的字幕块"""
+    test_content = """0
+00:00:07,984 --> 00:00:24,363
+Le gouvernement de soi et des autres is the title Foucault gave to the ten two-hour long seminars he taught from January to March 1983. The first two hours in January 5th constitute
+1
+00:00:24,363 --> 00:00:31,384
+almost an, and I hesitate to say this, but an intellectual testament of his work, although"""
+    
+    with open("test_input.srt", "w", encoding="utf-8") as f:
+        f.write(test_content)
+    
+    parallel_translate_srt(
+        input_path="test_input.srt",
+        output_path="test_output.srt",
+        src_lang="en",
+        dest_lang="zh-CN"
+    )
+
 if __name__ == "__main__":
-    input_file = '（米歇尔·福柯法兰西学院课程）11、治理自我与治理他者（1982-1983）——哥伦比亚当代批判思想中心研讨会.srt'
+    input_file = '/（米歇尔·福柯法兰西学院课程）11、治理自我与治理他者（1982-1983）——哥伦比亚当代批判思想中心研讨会.srt'
     output_file = 'translated_subtitles.srt'
     try:
         parallel_translate_srt(
